@@ -305,8 +305,12 @@ int otperf_udp_upload(const struct otperf_upload_params *param, struct otperf_re
 	ret = udp_upload(&sock, param, result, extra_results);
 
 	openthread_mutex_lock();
-	otUdpClose(instance, &sock);
+	otError error = otUdpClose(instance, &sock);
 	openthread_mutex_unlock();
+
+	if (error != OT_ERROR_NONE) {
+		LOG_ERR("Cannot close UDP Socket: %d", error);
+	}
 
 	return ret;
 }

@@ -249,8 +249,12 @@ static void udp_receiver_cleanup(void)
 	otInstance *instance = openthread_get_default_instance();
 
 	openthread_mutex_lock();
-	otUdpClose(instance, &current_socket);
+	otError error = otUdpClose(instance, &current_socket);
 	openthread_mutex_unlock();
+
+	if (error != OT_ERROR_NONE) {
+		LOG_ERR("Cannot close UDP Socket: %d", error);
+	}
 
 	udp_server_running = false;
 	udp_session_cb = NULL;
@@ -311,8 +315,12 @@ static int otperf_udp_receiver_init(otInstance *instance)
 		LOG_ERR("Cannot bind IPv6 UDP port %d: %d", bindAddr.mPort, error);
 
 		openthread_mutex_lock();
-		otUdpClose(instance, &current_socket);
+		error = otUdpClose(instance, &current_socket);
 		openthread_mutex_unlock();
+
+		if (error != OT_ERROR_NONE) {
+			LOG_ERR("Cannot close UDP Socket: %d", error);
+		}
 
 		return -EIO;
 	}
