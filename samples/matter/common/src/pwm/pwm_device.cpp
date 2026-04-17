@@ -16,7 +16,8 @@
 
 LOG_MODULE_DECLARE(app, CONFIG_CHIP_APP_LOG_LEVEL);
 
-namespace Nrf {
+namespace Nrf
+{
 
 int PWMDevice::Init(const pwm_dt_spec *aPWMDevice, uint8_t aMinLevel, uint8_t aMaxLevel, uint8_t aDefaultLevel)
 {
@@ -86,7 +87,7 @@ bool PWMDevice::InitiateAction(Action_t aAction, int32_t aActor, uint8_t *aValue
 
 void PWMDevice::SetLevel(uint8_t aLevel)
 {
-	LOG_INF("Setting brightness level to %u", aLevel);
+	LOG_DBG("Setting brightness level to %u", aLevel);
 	mLevel = aLevel;
 	ApplyLevel();
 }

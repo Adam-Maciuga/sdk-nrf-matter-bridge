@@ -1,0 +1,50 @@
+/*
+ * Copyright (c) 2026 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+ */
+
+/ {
+	chosen {
+		ncs,control-output-uart = &uart30;
+		/*
+		 * k_str_out() uses zephyr,console. USB CDC order is host-dependent: on many
+		 * setups /dev/ttyACM0 is one UART and /dev/ttyACM1 the other. If you get no
+		 * data on ACM0 but traffic on ACM1, route the console to &uart30 (this block).
+		 */
+		zephyr,console = &uart30;
+		zephyr,shell-uart = &uart30;
+		zephyr,uart-mcumgr = &uart30;
+		zephyr,bt-mon-uart = &uart30;
+		zephyr,bt-c2h-uart = &uart30;
+	};
+
+	aliases {
+		/* Use watchdog wdt31 as the application watchdog */
+		watchdog0 = &wdt31;
+	};
+};
+
+&rram_controller {
+	cpuapp_rram: rram@0 {
+		reg = <0x0 DT_SIZE_K(2036)>;
+		ranges = <0x0 0x0 DT_SIZE_K(2036)>;
+	};
+};
+
+&uart30 {
+	status = "okay";
+	current-speed = <1000000>;
+};
+
+&axon {
+	status = "okay";
+};
+
+&mx25r64 {
+	status = "disabled";
+};
+
+&wdt31 {
+	status = "okay";
+};

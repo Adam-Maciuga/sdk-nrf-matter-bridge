@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
  */
 
-#include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/audio/dmic.h>
+#include <haly/nrfy_pdm.h>
 
 #if defined(CONFIG_HAS_NORDIC_DMM)
 #include <dmm.h>
@@ -15,26 +15,26 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(dmic_sample);
 
-#define SAMPLE_RATE  16000
+#define SAMPLE_RATE	 16000
 #define SAMPLE_BIT_WIDTH 16
 #define BYTES_PER_SAMPLE (SAMPLE_BIT_WIDTH / 8)
-#define NO_OF_CHANNELS	1
+#define NO_OF_CHANNELS	 1
 
 /* Milliseconds to wait for a block to be captured by PCM peripheral. */
-#define READ_TIMEOUT     1200
+#define READ_TIMEOUT 1200
 
 /* Driver will allocate blocks from this slab to receive audio data into them.
  * Application, after getting a given block from the driver and processing its
  * data, needs to free that block.
  */
-#define AUDIO_BLOCK_SIZE   (BYTES_PER_SAMPLE * SAMPLE_RATE * NO_OF_CHANNELS / 40)
+#define AUDIO_BLOCK_SIZE (BYTES_PER_SAMPLE * SAMPLE_RATE * NO_OF_CHANNELS / 40)
 /* Driver allocates memory "in advance" therefore 2 blocks may be not enough. */
-#define BLOCK_COUNT      4
+#define BLOCK_COUNT	 16
 
 #if CONFIG_TEST_USE_DMM
 struct k_mem_slab mem_slab;
-char __aligned(WB_UP(4)) mem_slab_buffer[BLOCK_COUNT * WB_UP(AUDIO_BLOCK_SIZE)]
-					 DMM_MEMORY_SECTION(DT_NODELABEL(dmic_dev));
+char __aligned(WB_UP(4))
+mem_slab_buffer[BLOCK_COUNT * WB_UP(AUDIO_BLOCK_SIZE)] DMM_MEMORY_SECTION(DT_NODELABEL(dmic_dev));
 #else
 K_MEM_SLAB_DEFINE_STATIC(mem_slab, AUDIO_BLOCK_SIZE, BLOCK_COUNT, 4);
 #endif
@@ -51,33 +51,25 @@ int main(void)
 		.pcm_rate = SAMPLE_RATE,
 		.pcm_width = SAMPLE_BIT_WIDTH,
 		.block_size = AUDIO_BLOCK_SIZE,
-		.mem_slab  = &mem_slab,
+		.mem_slab = &mem_slab,
 	};
 
 	struct dmic_cfg cfg = {
-		.io = {
-			/* These fields can be used to limit the PDM clock
-			 * configurations that the driver is allowed to use
-			 * to those supported by the microphone.
-			 */
-			.min_pdm_clk_freq = 1000000,
-			.max_pdm_clk_freq = 3250000,
-			.min_pdm_clk_dc   = 40,
-			.max_pdm_clk_dc   = 60,
-		},
+		.io =
+			{
+				.min_pdm_clk_freq = 3200000,
+				.max_pdm_clk_freq = 3700000,
+				.min_pdm_clk_dc = 40,
+				.max_pdm_clk_dc = 60,
+			},
 		.streams = &stream,
-		.channel = {
-			.req_num_streams = 1,
-#if defined(CONFIG_TEST_STEREO_CONFIGURATION)
-			.req_num_chan = 2,
-			.req_chan_map_lo =
-				dmic_build_channel_map(0, 0, PDM_CHAN_LEFT) |
-				dmic_build_channel_map(1, 0, PDM_CHAN_RIGHT),
-#else
-			.req_num_chan = 1,
-			.req_chan_map_lo = dmic_build_channel_map(0, 0, PDM_CHAN_LEFT),
-#endif
-		},
+		.channel =
+			{
+				.req_chan_map_lo = dmic_build_channel_map(0, 0, PDM_CHAN_RIGHT),
+				.req_chan_map_hi = 0,
+				.req_num_chan = 1,
+				.req_num_streams = 1,
+			},
 	};
 
 	if (!device_is_ready(dmic_dev)) {
@@ -104,6 +96,7 @@ int main(void)
 		LOG_ERR("START trigger failed: %d", ret);
 		return ret;
 	}
+	nrfy_pdm_gain_set(NRF_PDM20, 0x10, 0x10);
 
 	while (1) {
 		ret = dmic_read(dmic_dev, 0, &buffer, &size, READ_TIMEOUT);
@@ -112,19 +105,7 @@ int main(void)
 			return ret;
 		}
 
-		/* Print buffer on serial port (in binary mode). */
-		unsigned char pcm_l, pcm_h;
-		int j;
-
-		uint16_t *pcm_out = buffer;
-
-		for (j = 0; j < size/2; j++) {
-			pcm_l = (char)(pcm_out[j] & 0xFF);
-			pcm_h = (char)((pcm_out[j] >> 8) & 0xFF);
-
-			z_impl_k_str_out(&pcm_l, 1);
-			z_impl_k_str_out(&pcm_h, 1);
-		}
+		z_impl_k_str_out((char *)buffer, size);
 
 		k_mem_slab_free(&mem_slab, buffer);
 
