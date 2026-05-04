@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
  */
 
+#include <zephyr/devicetree.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/kernel.h>
@@ -175,8 +176,16 @@ static uintptr_t ram_end_addr(void)
 {
 #if !defined(CONFIG_PARTITION_MANAGER_ENABLED)
 	const struct ram_bank *last_bank = &banks[RAM_BANK_COUNT - 1];
+	uintptr_t bank_table_end = last_bank->start + ram_bank_size(last_bank);
 
-	return last_bank->start + ram_bank_size(last_bank);
+#if DT_HAS_CHOSEN(zephyr_sram)
+	uintptr_t sram_chosen_end =
+		DT_REG_ADDR(DT_CHOSEN(zephyr_sram)) + DT_REG_SIZE(DT_CHOSEN(zephyr_sram));
+
+	return MIN(bank_table_end, sram_chosen_end);
+#else
+	return bank_table_end;
+#endif
 #else
 	return PM_SRAM_PRIMARY_END_ADDRESS;
 #endif
