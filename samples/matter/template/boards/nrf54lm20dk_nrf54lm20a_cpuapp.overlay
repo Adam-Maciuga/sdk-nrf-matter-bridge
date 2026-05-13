@@ -17,8 +17,13 @@
 	};
 };
 
-&mx25r64 {
-	status = "okay";
+/*
+ * Workaround for nrf700x sysbuild helper expecting a node label `qspi`
+ * with a `qspi_mm` reg-name on this board.
+ */
+qspi: &spi00 {
+	reg = <0x4d000 0x1000>, <0x10000000 0x04000000>;
+	reg-names = "qspi", "qspi_mm";
 };
 
 &wdt31 {
