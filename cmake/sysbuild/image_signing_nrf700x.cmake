@@ -55,30 +55,39 @@ function(nrf7x_signing_tasks input output_hex output_bin dependencies)
     dt_reg_size(nrf70_wifi_fw_partition_size TARGET ${DEFAULT_IMAGE} PATH
       "${nrf70_wifi_fw_partition_nodelabel}"
     )
+
+    # Align the mcuboot offset with the documentation
+    set(nrf70_wifi_patch_header_size 0x200)
     sysbuild_get(CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION IMAGE ${DEFAULT_IMAGE} VAR
       CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION KCONFIG
     )
-    sysbuild_get(CONFIG_ROM_START_OFFSET IMAGE ${DEFAULT_IMAGE} VAR CONFIG_ROM_START_OFFSET
-      KCONFIG
-    )
-    set(imgtool_sign ${PYTHON_EXECUTABLE} ${IMGTOOL} sign --version
+     set(imgtool_sign ${PYTHON_EXECUTABLE} ${IMGTOOL} sign --version
       ${CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION} --align ${write_block_size} --slot-size
-      ${nrf70_wifi_fw_partition_size} --pad-header --header-size ${CONFIG_ROM_START_OFFSET}
+      ${nrf70_wifi_fw_partition_size} --pad-header --header-size ${nrf70_wifi_patch_header_size}
     )
     sysbuild_get(CONFIG_MCUBOOT_HARDWARE_DOWNGRADE_PREVENTION IMAGE ${DEFAULT_IMAGE} VAR
       CONFIG_MCUBOOT_HARDWARE_DOWNGRADE_PREVENTION KCONFIG
     )
   endif()
 
+  # Same imgtool hash/signature options as the main app (image_signing.cmake); required for nRF54L
+  # ED25519 + SHA512 MCUboot.
+  set(imgtool_extra)
+  if(SB_CONFIG_BOOT_SIGNATURE_TYPE_PURE)
+    list(APPEND imgtool_extra --pure)
+  elseif(SB_CONFIG_BOOT_IMG_HASH_ALG_SHA512)
+    list(APPEND imgtool_extra --sha 512)
+  endif()
+
   if(CONFIG_MCUBOOT_HARDWARE_DOWNGRADE_PREVENTION)
-    set(imgtool_extra --security-counter ${CONFIG_MCUBOOT_HW_DOWNGRADE_PREVENTION_COUNTER_VALUE})
+    list(APPEND imgtool_extra --security-counter
+      ${CONFIG_MCUBOOT_HW_DOWNGRADE_PREVENTION_COUNTER_VALUE}
+    )
   endif()
 
   if(NOT "${keyfile}" STREQUAL "")
-    set(imgtool_extra -k "${keyfile}" ${imgtool_extra})
+    list(APPEND imgtool_extra -k "${keyfile}")
   endif()
-
-  set(imgtool_args ${imgtool_extra})
 
   # 'west sign' arguments for confirmed, unconfirmed and encrypted images.
   set(unconfirmed_args)
@@ -97,13 +106,13 @@ function(nrf7x_signing_tasks input output_hex output_bin dependencies)
 
   add_custom_command(OUTPUT ${output_hex}
     COMMAND
-    ${imgtool_sign} ${imgtool_args} ${input} ${output_hex}
+    ${imgtool_sign} ${imgtool_extra} ${input} ${output_hex}
     DEPENDS ${input} ${dependencies}
   )
 
   add_custom_command(OUTPUT ${output_bin}
     COMMAND
-    ${imgtool_sign} ${imgtool_args} ${input} ${output_bin}
+    ${imgtool_sign} ${imgtool_extra} ${input} ${output_bin}
     DEPENDS ${input} ${dependencies}
   )
 
@@ -112,6 +121,6 @@ function(nrf7x_signing_tasks input output_hex output_bin dependencies)
 #    list(APPEND byproducts ${output}.encrypted.hex)
 #
 #    set_property(GLOBAL APPEND PROPERTY extra_post_build_commands COMMAND
-#      ${imgtool_sign} ${imgtool_args} --encrypt "${keyfile_enc}" ${unconfirmed_args})
+#      ${imgtool_sign} ${imgtool_extra} --encrypt "${keyfile_enc}" ${unconfirmed_args})
 #  endif()
 endfunction()
