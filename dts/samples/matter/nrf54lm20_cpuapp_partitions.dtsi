@@ -56,5 +56,19 @@
 			label = "image-1";
 			reg = <0x00000000 DT_SIZE_K(1932)>;
 		};
+
+		slot2_partition: partition@1e3000 {
+			label = "image-2";
+			reg = <0x001e3000 0x21000>;
+		};
+
+		slot3_partition: partition@204000 {
+			label = "image-3";
+			reg = <0x00204000 0x21000>;
+		};
+
+		nrf70_wifi_fw_partition: nrf70_fw_partition: partition@1e3200 {
+			reg = <0x001e3200 0x20000>;
+		};
 	};
 };

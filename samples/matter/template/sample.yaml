@@ -40,6 +40,20 @@ tests:
     platform_allow:
       - nrf54lm20dk/nrf54lm20b/cpuapp
       - nrf54lm20dk/nrf54lm20a/cpuapp
+  sample.matter.template.nrf7002eb2.external_patch.debug:
+    sysbuild: true
+    build_only: true
+    extra_args:
+      - template_SHIELD=nrf7002eb2
+      - SB_CONFIG_WIFI_NRF70=y
+      - SB_CONFIG_WIFI_PATCHES_EXT_FLASH_STORE=y
+      - SB_CONFIG_DFU_MULTI_IMAGE_PACKAGE_WIFI_FW_PATCH=n
+    integration_platforms:
+      - nrf54lm20dk/nrf54lm20b/cpuapp
+      - nrf54lm20dk/nrf54lm20a/cpuapp
+    platform_allow:
+      - nrf54lm20dk/nrf54lm20b/cpuapp
+      - nrf54lm20dk/nrf54lm20a/cpuapp
   sample.matter.template.release:
     sysbuild: true
     build_only: true
