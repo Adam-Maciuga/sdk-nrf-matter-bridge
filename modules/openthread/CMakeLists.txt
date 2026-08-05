@@ -252,6 +252,15 @@ if(CONFIG_OPENTHREAD)
       list(APPEND ot_libs openthread-platform-utils-static)
     endif()
 
+    if(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+      target_compile_options(openthread-daps PRIVATE
+        $<TARGET_PROPERTY:zephyr_interface,INTERFACE_COMPILE_OPTIONS>
+        $<TARGET_PROPERTY:compiler,no_builtin>
+      )
+      add_dependencies(openthread-daps syscall_list_h_target)
+      list(APPEND ot_libs openthread-daps-static)
+    endif()
+
     target_link_libraries(zephyr PRIVATE ${ot_libs})
   else() # CONFIG_OPENTHREAD_SOURCES
     # Check for modified Kconfig options when using precompiled libraries
