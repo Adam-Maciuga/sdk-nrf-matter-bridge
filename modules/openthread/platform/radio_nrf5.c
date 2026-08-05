@@ -39,6 +39,10 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME, CONFIG_OPENTHREAD_PLATFORM_LOG_LEVEL);
 
 #include "nrf_802154.h"
 #include "nrf_802154_const.h"
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+#include "nrf_802154_types.h"
+#include <openthread/platform/daps.h>
+#endif
 
 #ifdef CONFIG_NRF_802154_CALLBACKS_DISPATCHER
 #include <net/nrf_802154_callbacks_dispatcher.h>
@@ -58,6 +62,24 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME, CONFIG_OPENTHREAD_PLATFORM_LOG_LEVEL);
 #define ACK_PKT_LENGTH 5
 #else
 #define ACK_PKT_LENGTH MAX_PACKET_SIZE
+#endif
+
+#if NRF_802154_GFSK_2MBPS_PHY_ENABLED
+#define NRF5_TS_END_TO_PHR(end, psdu, phy) \
+	nrf_802154_timestamp_end_to_phr_convert((end), (psdu), (phy))
+#define NRF5_TS_PHR_TO_SHR(phr, phy) nrf_802154_timestamp_phr_to_shr_convert((phr), (phy))
+#define NRF5_TS_PHR_TO_MHR(phr, phy) nrf_802154_timestamp_phr_to_mhr_convert((phr), (phy))
+#else
+#define NRF5_TS_END_TO_PHR(end, psdu, phy) nrf_802154_timestamp_end_to_phr_convert((end), (psdu))
+#define NRF5_TS_PHR_TO_SHR(phr, phy)         nrf_802154_timestamp_phr_to_shr_convert((phr))
+#define NRF5_TS_PHR_TO_MHR(phr, phy)         nrf_802154_timestamp_phr_to_mhr_convert((phr))
+#endif
+
+/* The PHY the radio is tuned to right now. Frame durations, and therefore timestamps, depend on it. */
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+#define NRF5_CURRENT_PHY() (nrf5_data.alt_phy.phy)
+#else
+#define NRF5_CURRENT_PHY() NRF_802154_PHY_OQPSK_250KBPS
 #endif
 
 #if defined(CONFIG_NRF5_UICR_EUI64_ENABLE)
@@ -111,6 +133,23 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME, CONFIG_OPENTHREAD_PLATFORM_LOG_LEVEL);
 
 #define CSL_IE_SIZE (6) /* Buffer for CSL IE: 2 bytes header + 4 bytes content */
 #define LM_IE_SIZE (32) /* Buffer for LM IE: 2 bytes header + 30 bytes content */
+
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+/*
+ * How long the receiver keeps listening on the Alternate PHY after a DAPS frame.
+ * TL3_SETTLING_DELAY is at most 255 µs; allow that plus the PSDU on air at 2 Mbps plus some additional margin.
+ */
+#define ALT_PHY_MAX_DAPS_TO_FRAME_US    256U
+#define ALT_PHY_RX_WAIT_AFTER_DAPS_US   (ALT_PHY_MAX_DAPS_TO_FRAME_US + 1000U + 250U)
+
+/** Alternate PHY exchange state — at most one exchange is active at a time. */
+enum alt_phy_state {
+	ALT_PHY_IDLE = 0,
+	ALT_PHY_TX_DAPS,    /* Outbound DAPS queued or on the Primary Link. */
+	ALT_PHY_TX_PAYLOAD, /* Outbound data frame is on air on the Alternate PHY. */
+	ALT_PHY_RX_WAIT,    /* DAPS accepted; waiting for the peer's Alternate PHY frame. */
+};
+#endif
 
 enum nrf5_pending_events {
 	PENDING_EVENT_FRAME_RECEIVED,	  /* Radio has received new frame */
@@ -171,6 +210,9 @@ struct nrf5_rx_frame {
 	int8_t rssi;	     /* Last received frame RSSI value. */
 	bool ack_fpb;	     /* FPB value in ACK sent for the received frame. */
 	bool ack_seb;	     /* SEB value in ACK sent for the received frame. */
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+	bool is_alternate_phy_payload;
+#endif
 };
 
 /** Energy detection callback */
@@ -199,6 +241,11 @@ struct nrf5_data {
 
 	/* 802.15.4 HW address. */
 	uint8_t mac[EXTENDED_ADDRESS_SIZE];
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+	/* Addresses the radio driver filters on, mirrored for DAPS destination matching. */
+	otShortAddress short_address;
+	otExtAddress ext_address;
+#endif
 
 	/* Radio capabilities */
 	otRadioCaps capabilities;
@@ -278,9 +325,29 @@ struct nrf5_data {
 		int64_t rx_time;
 	} csl;
 #endif /* CONFIG_NRF_802154_SER_HOST && CONFIG_OPENTHREAD_CSL_RECEIVER */
+
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+	/* Alternate PHY (HDR) exchange state. Owned entirely by this driver. */
+	struct {
+		/* PHY the radio is configured for right now. */
+		nrf_802154_phy_t phy;
+
+		enum alt_phy_state state;
+		/* The data frame, parked while the DAPS frame occupies the TX buffer. */
+		uint8_t payload_psdu[PHR_SIZE + MAX_PACKET_SIZE];
+		uint8_t payload_len;
+
+		struct k_timer rx_timer;
+	} alt_phy;
+#endif
 };
 
 static struct nrf5_data nrf5_data;
+
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+static void alt_phy_rx_timer_expiry(struct k_timer *timer);
+static bool nrf5_tx(const otRadioFrame *frame, uint8_t *payload, bool cca);
+#endif
 
 #ifdef CONFIG_NRF_802154_CALLBACKS_DISPATCHER
 static struct nrf_802154_radio_client_config radio_client_config;
@@ -601,6 +668,355 @@ static int64_t convert_32bit_us_wrapped_to_64bit_ns(uint32_t target_time_us_wrap
 	__ASSERT_NO_MSG(result <= INT64_MAX / NSEC_PER_USEC);
 	return (int64_t)result * NSEC_PER_USEC;
 }
+
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+
+static const char *alt_phy_name(nrf_802154_phy_t phy)
+{
+	switch (phy) {
+	case NRF_802154_PHY_OQPSK_250KBPS:
+		return "O-QPSK 250kbps";
+	case NRF_802154_PHY_EXP1_GFSK_2MBPS:
+		return "GFSK 2Mbps";
+	default:
+		return "unknown";
+	}
+}
+
+/**
+ * Map a Thread Alternate PHY identifier onto a radio driver PHY.
+ *
+ * Returns false for an identifier this build has no radio for, so the caller can fall back to the
+ * Primary Link instead of transmitting into the void.
+ */
+static bool alt_phy_from_id(uint8_t phy_id, nrf_802154_phy_t *phy)
+{
+	switch (phy_id) {
+	case OT_ALTERNATE_PHY_ID_TL3_GFSK:
+		*phy = NRF_802154_PHY_EXP1_GFSK_2MBPS;
+		return true;
+	default:
+		return false;
+	}
+}
+
+/** Retune the radio*/
+static void alt_phy_switch(nrf_802154_phy_t phy, const char *reason)
+{
+	if (nrf5_data.alt_phy.phy == phy) {
+		return;
+	}
+
+	nrf_802154_phy_set(phy);
+	nrf5_data.alt_phy.phy = phy;
+
+	LOG_DBG("HDR: radio switched to %s (%s)", alt_phy_name(phy), reason);
+}
+
+/**
+ * Return to the Primary Link once no Alternate PHY exchange is active.
+ */
+static void alt_phy_restore_primary(const char *reason)
+{
+	if (nrf5_data.alt_phy.phy == NRF_802154_PHY_OQPSK_250KBPS) {
+		return;
+	}
+
+	if (nrf5_data.alt_phy.state != ALT_PHY_IDLE) {
+		LOG_DBG("HDR: staying on %s, exchange still active in %u (%s)",
+			alt_phy_name(nrf5_data.alt_phy.phy), nrf5_data.alt_phy.state, reason);
+		return;
+	}
+
+	alt_phy_switch(NRF_802154_PHY_OQPSK_250KBPS, reason);
+
+	if (nrf5_data.state == OT_RADIO_STATE_RECEIVE) {
+		(void)nrf_802154_receive();
+	}
+}
+
+static void alt_phy_rx_timer_expiry(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+
+	if (nrf5_data.alt_phy.state != ALT_PHY_RX_WAIT) {
+		return;
+	}
+
+	LOG_WRN("HDR: no frame arrived within %u us of DAPS", ALT_PHY_RX_WAIT_AFTER_DAPS_US);
+
+	nrf5_data.alt_phy.state = ALT_PHY_IDLE;
+	alt_phy_restore_primary("RX exchange over");
+}
+
+/** Give up on an outgoing exchange: put the data frame back and return to the Primary Link. */
+static void alt_phy_tx_abort(void)
+{
+	if (nrf5_data.alt_phy.state == ALT_PHY_IDLE) {
+		return;
+	}
+
+	if (nrf5_data.alt_phy.state == ALT_PHY_TX_DAPS) {
+		/* The DAPS frame is still sitting in the TX buffer; put the data frame back. */
+		memcpy(nrf5_data.tx.psdu, nrf5_data.alt_phy.payload_psdu,
+		       (size_t)(PHR_SIZE + nrf5_data.alt_phy.payload_len));
+		nrf5_data.tx.frame.mLength = nrf5_data.alt_phy.payload_len;
+	}
+
+	nrf5_data.tx.frame.mPsdu = PSDU_DATA(nrf5_data.tx.psdu);
+	nrf5_data.alt_phy.state = ALT_PHY_IDLE;
+
+	alt_phy_restore_primary("TX exchange aborted");
+}
+
+/**
+ * Decide whether a transmission may start right now.
+ *
+ * @retval true   The radio is free; transmit normally.
+ * @retval false  Caller must fail the transmission and let the MAC retry it.
+ */
+static bool alt_phy_tx_request_allowed(void)
+{
+	if (nrf5_data.alt_phy.state == ALT_PHY_RX_WAIT) {
+		LOG_DBG("HDR: TX deferred, an announced Alternate PHY frame is still inbound");
+		return false;
+	}
+
+	return true;
+}
+
+/** @retval true  Still on the Primary Link; a peer DAPS frame may arrive. */
+static bool alt_phy_on_primary_link(void)
+{
+	switch (nrf5_data.alt_phy.state) {
+	case ALT_PHY_IDLE:
+	case ALT_PHY_TX_DAPS:
+		return true;
+	default:
+		return false;
+	}
+}
+
+/**
+ * Transmit the DAPS frame announcing the upcoming Alternate PHY frame.
+ *
+ */
+static bool alt_phy_tx_daps(uint8_t *psdu)
+{
+	nrf_802154_tx_error_t result;
+#if NRF_802154_CSMA_CA_ENABLED
+	nrf_802154_transmit_csma_ca_metadata_t metadata = {
+		.frame_props = {
+			.is_secured = false,
+			.dynamic_data_is_set = true,
+		},
+		.tx_power = {
+			.use_metadata_value = true,
+			.power = get_transmit_power_for_channel(nrf5_data.tx.frame.mChannel),
+		},
+	};
+
+	nrf_802154_csma_ca_max_backoffs_set(nrf5_data.tx.frame.mInfo.mTxInfo.mMaxCsmaBackoffs);
+	result = nrf_802154_transmit_csma_ca_raw(psdu, &metadata);
+#else
+	nrf_802154_transmit_metadata_t metadata = {
+		.frame_props = {
+			.is_secured = false,
+			.dynamic_data_is_set = true,
+		},
+		.cca = true,
+		.tx_power = {
+			.use_metadata_value = true,
+			.power = get_transmit_power_for_channel(nrf5_data.tx.frame.mChannel),
+		},
+	};
+
+	result = nrf_802154_transmit_raw(psdu, &metadata);
+#endif
+
+	return result == NRF_802154_TX_ERROR_NONE;
+}
+
+/**
+ * Start transmitting the current TX frame over its selected Alternate PHY.
+ *
+ * When a DAPS frame is required this only puts the DAPS frame on air; the data frame follows from
+ * `openthread_nrf_802154_transmitted_raw()` once the DAPS frame has been sent.
+ */
+static otError alt_phy_transmit_start(void)
+{
+	const otAlternatePhyTxInfo *tx_info = &nrf5_data.tx.frame.mInfo.mTxInfo.mAlternatePhy;
+	uint8_t *psdu = nrf5_data.tx.psdu;
+	nrf_802154_phy_t phy;
+	uint8_t daps_len = 0;
+	otError error;
+
+	if (!alt_phy_from_id(tx_info->mPhyId, &phy)) {
+		LOG_WRN("HDR: no radio for PHY %u, using the Primary Link", tx_info->mPhyId);
+		return OT_ERROR_NOT_CAPABLE;
+	}
+
+	PSDU_LENGTH(psdu) = nrf5_data.tx.frame.mLength;
+	nrf5_set_channel(nrf5_data.tx.frame.mChannel);
+
+	if (!tx_info->mRequiresDaps) {
+		/* The peer listens on both PHYs, so the data frame can go out directly. */
+		alt_phy_switch(phy, "direct TX, peer listens concurrently");
+
+		if (!nrf5_tx(&nrf5_data.tx.frame, psdu, true)) {
+			alt_phy_restore_primary("direct TX rejected");
+			return OT_ERROR_CHANNEL_ACCESS_FAILURE;
+		}
+
+		nrf5_data.alt_phy.state = ALT_PHY_TX_PAYLOAD;
+		LOG_DBG("HDR: TX %u B directly on %s", nrf5_data.tx.frame.mLength,
+			alt_phy_name(phy));
+
+		return OT_ERROR_NONE;
+	}
+
+	/* Park the data frame so the DAPS frame can use the TX buffer. */
+	nrf5_data.alt_phy.payload_len = nrf5_data.tx.frame.mLength;
+	memcpy(nrf5_data.alt_phy.payload_psdu, psdu,
+	       (size_t)(PHR_SIZE + nrf5_data.alt_phy.payload_len));
+
+	error = otDapsBuild(PSDU_DATA(nrf5_data.alt_phy.payload_psdu), nrf5_data.alt_phy.payload_len,
+			    tx_info->mPhyId, tx_info->mChannel, PSDU_DATA(psdu), MAX_PACKET_SIZE,
+			    &daps_len);
+	if (error != OT_ERROR_NONE) {
+		LOG_WRN("HDR: cannot build DAPS for this frame (%u), using the Primary Link",
+			error);
+		nrf5_data.tx.frame.mLength = nrf5_data.alt_phy.payload_len;
+		return OT_ERROR_NOT_CAPABLE;
+	}
+
+	PSDU_LENGTH(psdu) = daps_len;
+	nrf5_data.tx.frame.mLength = daps_len;
+	nrf5_data.alt_phy.state = ALT_PHY_TX_DAPS;
+
+	if (!alt_phy_tx_daps(psdu)) {
+		LOG_WRN("HDR: DAPS TX rejected by the radio");
+		alt_phy_tx_abort();
+		return OT_ERROR_CHANNEL_ACCESS_FAILURE;
+	}
+
+	LOG_DBG("HDR: DAPS TX started, %u B, announcing %s for a %u B frame", daps_len,
+		alt_phy_name(phy), nrf5_data.alt_phy.payload_len);
+
+	return OT_ERROR_NONE;
+}
+
+/**
+ * Continue an exchange after the DAPS frame has been transmitted.
+ *
+ */
+static void alt_phy_tx_continue_after_daps(void)
+{
+	const otAlternatePhyTxInfo *tx_info = &nrf5_data.tx.frame.mInfo.mTxInfo.mAlternatePhy;
+	nrf_802154_phy_t phy;
+
+	LOG_DBG("HDR: DAPS sent (settling delay %u us, aifs %u us)",
+		tx_info->mParams.mTl3Gfsk.mSettlingDelay, tx_info->mParams.mTl3Gfsk.mAifs);
+
+	if (!alt_phy_from_id(tx_info->mPhyId, &phy)) {
+		nrf5_data.tx.result = OT_ERROR_ABORT;
+		alt_phy_tx_abort();
+		set_pending_event(PENDING_EVENT_TX_DONE);
+		return;
+	}
+
+	alt_phy_switch(phy, "DAPS sent");
+
+	/* Restore the data frame. The DAPS exchange already won the channel, so no further CCA. */
+	memcpy(nrf5_data.tx.psdu, nrf5_data.alt_phy.payload_psdu,
+	       (size_t)(PHR_SIZE + nrf5_data.alt_phy.payload_len));
+	nrf5_data.tx.frame.mPsdu = PSDU_DATA(nrf5_data.tx.psdu);
+	nrf5_data.tx.frame.mLength = nrf5_data.alt_phy.payload_len;
+
+	nrf5_data.alt_phy.state = ALT_PHY_TX_PAYLOAD;
+
+	if (!nrf5_tx(&nrf5_data.tx.frame, nrf5_data.tx.psdu, false)) {
+		LOG_ERR("HDR: Alternate PHY frame TX rejected by the radio");
+		nrf5_data.tx.result = OT_ERROR_CHANNEL_ACCESS_FAILURE;
+		alt_phy_tx_abort();
+		set_pending_event(PENDING_EVENT_TX_DONE);
+		return;
+	}
+
+	LOG_DBG("HDR: TX %u B on %s", nrf5_data.tx.frame.mLength, alt_phy_name(phy));
+}
+
+/**
+ * Try to consume a Primary Link frame as a DAPS announcement.
+ *
+ * Call only while @ref alt_phy_on_primary_link.
+ *
+ * @retval true   The frame was a DAPS frame and has been consumed.
+ * @retval false  The frame is unrelated and must be processed normally.
+ */
+static bool alt_phy_rx_consume_daps(uint8_t *data)
+{
+	otDapsInfo info;
+	nrf_802154_phy_t phy;
+
+	if (!otDapsParse(PSDU_DATA(data), PSDU_LENGTH(data), &info)) {
+		return false;
+	}
+
+	if (!otDapsIsAddressedTo(&info, nrf5_data.short_address, &nrf5_data.ext_address)) {
+		LOG_DBG("HDR: DAPS for another device, ignored");
+		goto consumed;
+	}
+
+	if (info.mChannel != OT_ALTERNATE_PHY_CHANNEL_SAME && info.mChannel != nrf5_data.channel) {
+		LOG_WRN("HDR: DAPS requests channel %u, not supported", info.mChannel);
+		goto consumed;
+	}
+
+	if (!alt_phy_from_id(info.mPhyId, &phy)) {
+		LOG_WRN("HDR: DAPS requests PHY %u, no radio for it", info.mPhyId);
+		goto consumed;
+	}
+
+	if (nrf5_data.alt_phy.state == ALT_PHY_TX_DAPS) {
+		/*
+		 * A peer won the Primary Link while our DAPS was waiting in CSMA-CA. We cannot
+		 * accept its exchange without cancelling our pending transmission, and the
+		 * public nrf_802154 API provides no such cancellation. Dropping the peer DAPS
+		 * also makes our pending exchange fail because the peer has switched PHY.
+		 * Higher-layer retries are the only recovery available.
+		 */
+		LOG_ERR("HDR: simultaneous DAPS collision; both current exchanges are unrecoverable");
+		goto consumed;
+	}
+
+	LOG_DBG("HDR: DAPS received, announcing %s", alt_phy_name(phy));
+
+	alt_phy_switch(phy, "DAPS received");
+	nrf5_data.alt_phy.state = ALT_PHY_RX_WAIT;
+	k_timer_start(&nrf5_data.alt_phy.rx_timer, K_USEC(ALT_PHY_RX_WAIT_AFTER_DAPS_US),
+		      K_NO_WAIT);
+
+consumed:
+	nrf_802154_buffer_free_raw(data);
+	(void)nrf_802154_receive();
+
+	return true;
+}
+
+/** Note that the awaited Alternate PHY frame has arrived and return to the Primary Link. */
+static void alt_phy_rx_frame_taken(uint8_t mpdu_len)
+{
+	LOG_DBG("HDR: Alternate PHY frame received, %u B on %s", mpdu_len,
+		alt_phy_name(nrf5_data.alt_phy.phy));
+
+	k_timer_stop(&nrf5_data.alt_phy.rx_timer);
+	nrf5_data.alt_phy.state = ALT_PHY_IDLE;
+	alt_phy_restore_primary("RX exchange over");
+}
+
+#endif /* CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK */
+
 static void openthread_nrf_802154_radio_client_init(void)
 {
 	/* Get the default tx output power from Kconfig */
@@ -613,6 +1029,10 @@ static void openthread_nrf_802154_radio_client_init(void)
 	nrf5_data.rx_on_when_idle = true;
 
 	nrf5_get_eui64(nrf5_data.mac);
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+	nrf5_data.short_address = NRF5_NO_SHORT_ADDRESS_ASSIGNED;
+	memcpy(nrf5_data.ext_address.m8, nrf5_data.mac, EXTENDED_ADDRESS_SIZE);
+#endif
 
 	k_fifo_init(&nrf5_data.rx.fifo);
 
@@ -622,6 +1042,12 @@ static void openthread_nrf_802154_radio_client_init(void)
 #endif
 
 	k_sem_init(&nrf5_data.rssi_wait, 0, 1);
+
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+	k_timer_init(&nrf5_data.alt_phy.rx_timer, alt_phy_rx_timer_expiry, NULL);
+	nrf5_data.alt_phy.phy = NRF_802154_PHY_OQPSK_250KBPS;
+	nrf5_data.alt_phy.state = ALT_PHY_IDLE;
+#endif
 
 #if CONFIG_NRF_802154_CALLBACKS_DISPATCHER
 	nrf5_data.state = OT_RADIO_STATE_SLEEP;
@@ -663,6 +1089,9 @@ static void openthread_handle_received_frame(otInstance *instance, struct nrf5_r
 	recv_frame.mInfo.mRxInfo.mAckedWithFramePending = rx_frame->ack_fpb;
 	recv_frame.mInfo.mRxInfo.mTimestamp = rx_frame->time;
 	recv_frame.mInfo.mRxInfo.mAckedWithSecEnhAck = rx_frame->ack_seb;
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+	recv_frame.mInfo.mRxInfo.mIsAlternatePhy = rx_frame->is_alternate_phy_payload;
+#endif
 
 	LOG_DBG("RX %p len: %u, ch: %u, rssi: %d", (void *)recv_frame.mPsdu, recv_frame.mLength,
 		recv_frame.mChannel, recv_frame.mInfo.mRxInfo.mRssi);
@@ -761,11 +1190,12 @@ static bool nrf5_tx_at(otRadioFrame *frame, uint8_t *payload)
 	/* The timestamp points to the start of PHR but `nrf_802154_transmit_raw_at`
 	 * expects a timestamp pointing to start of SHR.
 	 */
-	uint64_t tx_at = nrf_802154_timestamp_phr_to_shr_convert(
+	uint64_t tx_at = NRF5_TS_PHR_TO_SHR(
 		convert_32bit_us_wrapped_to_64bit_ns(
 			nrf5_data.tx.frame.mInfo.mTxInfo.mTxDelayBaseTime +
 			nrf5_data.tx.frame.mInfo.mTxInfo.mTxDelay) /
-		NSEC_PER_USEC);
+			NSEC_PER_USEC,
+		NRF_802154_PHY_OQPSK_250KBPS);
 
 	nrf_802154_tx_error_t result = nrf_802154_transmit_raw_at(payload, tx_at, &metadata);
 	__ASSERT(result != NRF_802154_TX_ERROR_INVALID_REQUEST, "Invalid transmit request");
@@ -802,6 +1232,31 @@ static otError transmit_frame(otInstance *aInstance)
 		LOG_ERR("Payload (with FCS) too large: %d", nrf5_data.tx.frame.mLength);
 		return OT_ERROR_INVALID_ARGS;
 	}
+
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+	if (!alt_phy_tx_request_allowed()) {
+		nrf5_data.tx.result = OT_ERROR_CHANNEL_ACCESS_FAILURE;
+		set_pending_event(PENDING_EVENT_TX_DONE);
+		return OT_ERROR_NONE;
+	}
+
+	if (nrf5_data.tx.frame.mInfo.mTxInfo.mIsAlternatePhy) {
+		otError alt_error = alt_phy_transmit_start();
+
+		if (alt_error == OT_ERROR_NONE) {
+			otPlatRadioTxStarted(aInstance, &nrf5_data.tx.frame);
+			return OT_ERROR_NONE;
+		}
+
+		if (alt_error != OT_ERROR_NOT_CAPABLE) {
+			nrf5_data.tx.result = alt_error;
+			set_pending_event(PENDING_EVENT_TX_DONE);
+			return OT_ERROR_NONE;
+		}
+
+		/* The Alternate PHY is unusable for this frame; send it on the Primary Link. */
+	}
+#endif
 
 	LOG_DBG("TX %p len: %u", (void *)nrf5_data.tx.frame.mPsdu, nrf5_data.tx.frame.mLength);
 
@@ -1068,6 +1523,9 @@ void otPlatRadioSetExtendedAddress(otInstance *aInstance, const otExtAddress *aE
 		ieee_addr[5], ieee_addr[4], ieee_addr[3], ieee_addr[2], ieee_addr[1], ieee_addr[0]);
 
 	nrf_802154_extended_address_set(ieee_addr);
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+	nrf5_data.ext_address = *aExtAddress;
+#endif
 
 #ifdef CONFIG_NRF_802154_CALLBACKS_DISPATCHER
 	memcpy(radio_client_config.mac, ieee_addr, sizeof(radio_client_config.mac));
@@ -1084,6 +1542,9 @@ void otPlatRadioSetShortAddress(otInstance *aInstance, otShortAddress aShortAddr
 
 	sys_put_le16(aShortAddress, short_addr_le);
 	nrf_802154_short_address_set(short_addr_le);
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+	nrf5_data.short_address = aShortAddress;
+#endif
 
 #ifdef CONFIG_NRF_802154_CALLBACKS_DISPATCHER
 	memcpy(radio_client_config.short_address, short_addr_le,
@@ -1594,7 +2055,8 @@ void otPlatRadioUpdateCslSampleTime(otInstance *aInstance, uint32_t aCslSampleTi
 	if (changed) {
 #endif /* CONFIG_NRF_802154_SER_HOST */
 		nrf_802154_csl_writer_anchor_time_set(
-			nrf_802154_timestamp_phr_to_mhr_convert(expected_rx_time / NSEC_PER_USEC));
+			NRF5_TS_PHR_TO_MHR(expected_rx_time / NSEC_PER_USEC,
+					   NRF_802154_PHY_OQPSK_250KBPS));
 #if defined(CONFIG_NRF_802154_SER_HOST)
 	}
 #endif /* CONFIG_NRF_802154_SER_HOST */
@@ -1822,17 +2284,37 @@ otError platformRadioTransmitModulatedCarrier(otInstance *aInstance, bool aEnabl
 static void openthread_nrf_802154_received_timestamp_raw(uint8_t *data, int8_t power, uint8_t lqi,
 							 uint64_t time)
 {
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+	if (alt_phy_on_primary_link() && alt_phy_rx_consume_daps(data)) {
+		return;
+	}
+#endif
+
 	for (uint32_t i = 0; i < ARRAY_SIZE(nrf5_data.rx.frames); i++) {
 		if (nrf5_data.rx.frames[i].psdu != NULL) {
 			continue;
 		}
 
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+		{
+			const bool on_alt_phy = (nrf5_data.alt_phy.state == ALT_PHY_RX_WAIT);
+
+			if (on_alt_phy) {
+				alt_phy_rx_frame_taken(PSDU_LENGTH(data));
+			}
+
+			nrf5_data.rx.frames[i].is_alternate_phy_payload = on_alt_phy;
+			nrf5_data.rx.frames[i].time =
+				NRF5_TS_END_TO_PHR(time, data[0], nrf5_data.alt_phy.phy);
+		}
+#else
+		nrf5_data.rx.frames[i].time = NRF5_TS_END_TO_PHR(time, data[0],
+								 NRF_802154_PHY_OQPSK_250KBPS);
+#endif
+
 		nrf5_data.rx.frames[i].psdu = data;
 		nrf5_data.rx.frames[i].rssi = power;
 		nrf5_data.rx.frames[i].lqi = lqi;
-
-		nrf5_data.rx.frames[i].time =
-			nrf_802154_timestamp_end_to_phr_convert(time, data[0]);
 
 		nrf5_data.rx.frames[i].ack_fpb = nrf5_data.rx.last_frame_ack_fpb;
 		nrf5_data.rx.frames[i].ack_seb = nrf5_data.rx.last_frame_ack_seb;
@@ -1920,6 +2402,23 @@ openthread_nrf_802154_transmitted_raw(uint8_t *frame,
 {
 	ARG_UNUSED(frame);
 
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+	if (nrf5_data.alt_phy.state == ALT_PHY_TX_DAPS) {
+		/* Only the DAPS frame has been sent so far; the data frame still has to follow. */
+		alt_phy_tx_continue_after_daps();
+		return;
+	}
+
+	if (nrf5_data.alt_phy.state == ALT_PHY_TX_PAYLOAD) {
+		/* The acknowledgement arrived on the Alternate PHY and is already in `metadata`, so
+		 * the radio can go back to the Primary Link now.
+		 */
+		LOG_DBG("HDR: Alternate PHY frame sent%s",
+			metadata->data.transmitted.p_ack != NULL ? " and acknowledged" : "");
+		nrf5_data.alt_phy.state = ALT_PHY_IDLE;
+	}
+#endif
+
 	nrf5_data.tx.result = OT_ERROR_NONE;
 	nrf5_data.ack.desc.psdu = metadata->data.transmitted.p_ack;
 
@@ -1932,10 +2431,16 @@ openthread_nrf_802154_transmitted_raw(uint8_t *frame,
 			 */
 			nrf5_data.ack.desc.time = NRF_802154_NO_TIMESTAMP;
 		} else {
-			nrf5_data.ack.desc.time = nrf_802154_timestamp_end_to_phr_convert(
-				metadata->data.transmitted.time, nrf5_data.ack.desc.psdu[0]);
+			/* The acknowledgement arrives on the same PHY the frame was sent on. */
+			nrf5_data.ack.desc.time = NRF5_TS_END_TO_PHR(
+				metadata->data.transmitted.time, nrf5_data.ack.desc.psdu[0],
+				NRF5_CURRENT_PHY());
 		}
 	}
+
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+	alt_phy_restore_primary("TX exchange over");
+#endif
 
 	update_tx_frame_info(&nrf5_data.tx.frame, metadata);
 
@@ -1967,6 +2472,15 @@ openthread_nrf_802154_transmit_failed(uint8_t *frame, nrf_802154_tx_error_t erro
 	ARG_UNUSED(frame);
 
 	nrf5_data.tx.result = nrf5_tx_error_to_ot_error(error);
+
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+	if (nrf5_data.alt_phy.state != ALT_PHY_IDLE) {
+		LOG_WRN("HDR: exchange failed while sending the %s frame, radio error %u",
+			nrf5_data.alt_phy.state == ALT_PHY_TX_DAPS ? "DAPS" : "Alternate PHY",
+			error);
+		alt_phy_tx_abort();
+	}
+#endif
 
 	LOG_WRN("nrf_802154_transmit_failed: %u, tx result: %u", error, nrf5_data.tx.result);
 	update_tx_frame_info(&nrf5_data.tx.frame, metadata);

@@ -35,6 +35,8 @@ manifest:
       url-base: https://github.com/boschsensortec
     - name: eembc
       url-base: https://github.com/eembc
+    - name: adma
+      url-base: https://github.com/Adam-Maciuga
 
   # If not otherwise specified, the projects below should be obtained
   # from the ncs remote.
@@ -42,7 +44,7 @@ manifest:
     remote: ncs
 
   group-filter:
-    - -nrf-802154
+    - +nrf-802154
     - -dragoon
     - -find-my
     - -babblesim
@@ -179,9 +181,9 @@ manifest:
           upstream-sha: 181b0cb14ff007ec912f2ba6627e05dfb066c008
           compare-by-default: false
     - name: nrf-802154
-      repo-path: sdk-nrf-802154
+      url: git@github.com:pkwiek/sdk-nrf-802154.git
       path: nrf-802154
-      revision: 9306243073e63159d78929c43166f5aba8b342a1
+      revision: KRKNWK-21997_phy_gfsk
       groups:
         - nrf-802154
     - name: dragoon
@@ -228,9 +230,10 @@ manifest:
       groups:
         - libmodem
     - name: openthread
+      remote: adma
       repo-path: sdk-openthread
       path: modules/lib/openthread
-      revision: pull/108/head
+      revision: phy_switching
       userdata:
         ncs:
           upstream-url: https://github.com/openthread/openthread

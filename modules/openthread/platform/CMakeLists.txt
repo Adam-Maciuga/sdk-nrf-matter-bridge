@@ -6,6 +6,10 @@ zephyr_library_named(openthread_platform)
 zephyr_library_sources_ifdef(CONFIG_OPENTHREAD_CRYPTO_PSA crypto_psa.c)
 zephyr_library_sources_ifdef(CONFIG_OPENTHREAD_ALTERNATE_PHY alternate_phy.c)
 
+if(CONFIG_OPENTHREAD_ALTERNATE_PHY)
+  zephyr_library_compile_definitions(OPENTHREAD_CONFIG_ALTERNATE_PHY_ENABLE=1)
+endif()
+
 # Source platform files from Zephyr
 zephyr_library_sources(
   ${ZEPHYR_BASE}/modules/openthread/platform/alarm_micro.c
