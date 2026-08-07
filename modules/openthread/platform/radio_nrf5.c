@@ -1222,13 +1222,24 @@ static void handle_rx_failed(otInstance *aInstance)
 	}
 }
 
+static uint16_t tx_max_packet_size(const otRadioFrame *frame)
+{
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+	if (frame->mInfo.mTxInfo.mIsAlternatePhy) {
+		return frame->mInfo.mTxInfo.mAlternatePhy.mMaxPsdu;
+	}
+#endif
+
+	return OT_RADIO_FRAME_MAX_SIZE;
+}
+
 static otError transmit_frame(otInstance *aInstance)
 {
 	bool result = true;
 
 	ARG_UNUSED(aInstance);
 
-	if (nrf5_data.tx.frame.mLength > MAX_PACKET_SIZE) {
+	if (nrf5_data.tx.frame.mLength > tx_max_packet_size(&nrf5_data.tx.frame)) {
 		LOG_ERR("Payload (with FCS) too large: %d", nrf5_data.tx.frame.mLength);
 		return OT_ERROR_INVALID_ARGS;
 	}

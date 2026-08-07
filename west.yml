@@ -233,7 +233,7 @@ manifest:
       remote: adma
       repo-path: sdk-openthread
       path: modules/lib/openthread
-      revision: phy_switching
+      revision: spec_alignment
       userdata:
         ncs:
           upstream-url: https://github.com/openthread/openthread
