@@ -288,7 +288,7 @@ tests:
       - nrf54lm20dk/nrf54lm20b/cpuapp
       - nrf54lm20dk/nrf54lm20a/cpuapp
     extra_args:
-      - cli_SNIPPET="ot-hdr,ot-hdr-log"
+      - cli_SNIPPET="ot-hdr;ot-hdr-log"
     integration_platforms:
       - nrf54l15dk/nrf54l15/cpuapp
       - nrf54lm20dk/nrf54lm20b/cpuapp

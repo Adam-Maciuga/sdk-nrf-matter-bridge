@@ -136,11 +136,12 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME, CONFIG_OPENTHREAD_PLATFORM_LOG_LEVEL);
 
 #if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
 /*
- * How long the receiver keeps listening on the Alternate PHY after a DAPS frame.
- * TL3_SETTLING_DELAY is at most 255 µs; allow that plus the PSDU on air at 2 Mbps plus some additional margin.
+ * Alternate PHY RX timeout: maximum time to wait for the peer's data frame after accepting
+ * an exchange. TL3_SETTLING_DELAY is at most 255 µs; allow that plus the PSDU on air at
+ * 2 Mbps plus some additional margin.
  */
 #define ALT_PHY_MAX_DAPS_TO_FRAME_US    256U
-#define ALT_PHY_RX_WAIT_AFTER_DAPS_US   (ALT_PHY_MAX_DAPS_TO_FRAME_US + 1000U + 250U)
+#define ALT_PHY_RX_TIMEOUT_US           (ALT_PHY_MAX_DAPS_TO_FRAME_US + 1000U + 250U)
 
 /** Alternate PHY exchange state — at most one exchange is active at a time. */
 enum alt_phy_state {
@@ -336,8 +337,6 @@ struct nrf5_data {
 		/* The data frame, parked while the DAPS frame occupies the TX buffer. */
 		uint8_t payload_psdu[PHR_SIZE + MAX_PACKET_SIZE];
 		uint8_t payload_len;
-
-		struct k_timer rx_timer;
 	} alt_phy;
 #endif
 };
@@ -345,7 +344,8 @@ struct nrf5_data {
 static struct nrf5_data nrf5_data;
 
 #if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
-static void alt_phy_rx_timer_expiry(struct k_timer *timer);
+static struct k_timer alt_phy_rx_timeout;
+static void alt_phy_rx_timeout_expiry(struct k_timer *timer);
 static bool nrf5_tx(const otRadioFrame *frame, uint8_t *payload, bool cca);
 #endif
 
@@ -735,7 +735,7 @@ static void alt_phy_restore_primary(const char *reason)
 	}
 }
 
-static void alt_phy_rx_timer_expiry(struct k_timer *timer)
+static void alt_phy_rx_timeout_expiry(struct k_timer *timer)
 {
 	ARG_UNUSED(timer);
 
@@ -743,7 +743,7 @@ static void alt_phy_rx_timer_expiry(struct k_timer *timer)
 		return;
 	}
 
-	LOG_WRN("HDR: no frame arrived within %u us of DAPS", ALT_PHY_RX_WAIT_AFTER_DAPS_US);
+	LOG_WRN("HDR: no frame arrived within %u us of DAPS", ALT_PHY_RX_TIMEOUT_US);
 
 	nrf5_data.alt_phy.state = ALT_PHY_IDLE;
 	alt_phy_restore_primary("RX exchange over");
@@ -958,13 +958,21 @@ static bool alt_phy_rx_consume_daps(uint8_t *data)
 {
 	otDapsInfo info;
 	nrf_802154_phy_t phy;
+	otError error;
 
-	if (!otDapsParse(PSDU_DATA(data), PSDU_LENGTH(data), &info)) {
+	error = otDapsParse(PSDU_DATA(data), PSDU_LENGTH(data), &info);
+	if (error != OT_ERROR_NONE) {
+		if (error != OT_ERROR_NOT_FOUND) {
+			LOG_WRN("HDR: DAPS frame rejected (%u), handling it as a normal frame",
+				error);
+		}
+
 		return false;
 	}
 
-	if (!otDapsIsAddressedTo(&info, nrf5_data.short_address, &nrf5_data.ext_address)) {
-		LOG_DBG("HDR: DAPS for another device, ignored");
+	error = otDapsIsAddressedTo(&info, nrf5_data.short_address, &nrf5_data.ext_address);
+	if (error != OT_ERROR_NONE) {
+		LOG_DBG("HDR: DAPS not for this device (%u), ignored", error);
 		goto consumed;
 	}
 
@@ -994,7 +1002,7 @@ static bool alt_phy_rx_consume_daps(uint8_t *data)
 
 	alt_phy_switch(phy, "DAPS received");
 	nrf5_data.alt_phy.state = ALT_PHY_RX_WAIT;
-	k_timer_start(&nrf5_data.alt_phy.rx_timer, K_USEC(ALT_PHY_RX_WAIT_AFTER_DAPS_US),
+	k_timer_start(&alt_phy_rx_timeout, K_USEC(ALT_PHY_RX_TIMEOUT_US),
 		      K_NO_WAIT);
 
 consumed:
@@ -1010,7 +1018,7 @@ static void alt_phy_rx_frame_taken(uint8_t mpdu_len)
 	LOG_DBG("HDR: Alternate PHY frame received, %u B on %s", mpdu_len,
 		alt_phy_name(nrf5_data.alt_phy.phy));
 
-	k_timer_stop(&nrf5_data.alt_phy.rx_timer);
+	k_timer_stop(&alt_phy_rx_timeout);
 	nrf5_data.alt_phy.state = ALT_PHY_IDLE;
 	alt_phy_restore_primary("RX exchange over");
 }
@@ -1044,7 +1052,7 @@ static void openthread_nrf_802154_radio_client_init(void)
 	k_sem_init(&nrf5_data.rssi_wait, 0, 1);
 
 #if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
-	k_timer_init(&nrf5_data.alt_phy.rx_timer, alt_phy_rx_timer_expiry, NULL);
+	k_timer_init(&alt_phy_rx_timeout, alt_phy_rx_timeout_expiry, NULL);
 	nrf5_data.alt_phy.phy = NRF_802154_PHY_OQPSK_250KBPS;
 	nrf5_data.alt_phy.state = ALT_PHY_IDLE;
 #endif
