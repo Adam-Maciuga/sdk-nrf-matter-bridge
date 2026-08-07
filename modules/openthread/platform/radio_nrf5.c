@@ -909,14 +909,27 @@ static otError alt_phy_transmit_start(void)
 /**
  * Continue an exchange after the DAPS frame has been transmitted.
  *
+ * Switches to the Alternate PHY and waits TL3_SETTLING_DELAY before sending the data frame.
  */
 static void alt_phy_tx_continue_after_daps(void)
 {
 	const otAlternatePhyTxInfo *tx_info = &nrf5_data.tx.frame.mInfo.mTxInfo.mAlternatePhy;
+	nrf_802154_transmit_at_metadata_t metadata = {
+		.frame_props = {
+			.is_secured = nrf5_data.tx.frame.mInfo.mTxInfo.mIsSecurityProcessed,
+			.dynamic_data_is_set = nrf5_data.tx.frame.mInfo.mTxInfo.mIsHeaderUpdated,
+		},
+		.cca = false,
+		.channel = nrf5_data.tx.frame.mChannel,
+		.tx_power = {
+			.use_metadata_value = true,
+			.power = get_transmit_power_for_channel(nrf5_data.tx.frame.mChannel),
+		},
+	};
+	nrf_802154_stat_timestamps_t timestamps;
+	nrf_802154_tx_error_t result;
 	nrf_802154_phy_t phy;
-
-	LOG_DBG("HDR: DAPS sent (settling delay %u us, aifs %u us)",
-		tx_info->mParams.mTl3Gfsk.mSettlingDelay, tx_info->mParams.mTl3Gfsk.mAifs);
+	uint64_t tx_at;
 
 	if (!alt_phy_from_id(tx_info->mPhyId, &phy)) {
 		nrf5_data.tx.result = OT_ERROR_ABORT;
@@ -924,6 +937,9 @@ static void alt_phy_tx_continue_after_daps(void)
 		set_pending_event(PENDING_EVENT_TX_DONE);
 		return;
 	}
+
+	nrf_802154_stat_timestamps_get(&timestamps);
+	tx_at = timestamps.last_tx_end_timestamp + tx_info->mParams.mTl3Gfsk.mSettlingDelay;
 
 	alt_phy_switch(phy, "DAPS sent");
 
@@ -934,16 +950,18 @@ static void alt_phy_tx_continue_after_daps(void)
 	nrf5_data.tx.frame.mLength = nrf5_data.alt_phy.payload_len;
 
 	nrf5_data.alt_phy.state = ALT_PHY_TX_PAYLOAD;
+	result = nrf_802154_transmit_raw_at(nrf5_data.tx.psdu, tx_at, &metadata);
 
-	if (!nrf5_tx(&nrf5_data.tx.frame, nrf5_data.tx.psdu, false)) {
-		LOG_ERR("HDR: Alternate PHY frame TX rejected by the radio");
+	if (result != NRF_802154_TX_ERROR_NONE) {
+		LOG_ERR("HDR: Alternate PHY frame TX scheduling rejected by the radio (%u)", result);
 		nrf5_data.tx.result = OT_ERROR_CHANNEL_ACCESS_FAILURE;
 		alt_phy_tx_abort();
 		set_pending_event(PENDING_EVENT_TX_DONE);
 		return;
 	}
 
-	LOG_DBG("HDR: TX %u B on %s", nrf5_data.tx.frame.mLength, alt_phy_name(phy));
+	LOG_DBG("HDR: TX %u B on %s scheduled %u us after DAPS", nrf5_data.tx.frame.mLength,
+		alt_phy_name(phy), tx_info->mParams.mTl3Gfsk.mSettlingDelay);
 }
 
 /**
