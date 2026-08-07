@@ -14,6 +14,7 @@
 #include <zephyr/kernel.h>
 
 #include <openthread/platform/alternate_phy.h>
+#include <utils/encoding.h>
 
 uint8_t otPlatAlternatePhyGetCapabilities(otInstance *aInstance, otAlternatePhyCapability *aCaps,
 					  uint8_t aMaxCount)
@@ -33,6 +34,9 @@ uint8_t otPlatAlternatePhyGetCapabilities(otInstance *aInstance, otAlternatePhyC
 			CONFIG_OPENTHREAD_ALTERNATE_PHY_SETTLING_DELAY;
 		aCaps[count].mParameters[OT_ALTERNATE_PHY_TL3_GFSK_PARAMETER_AIFS] =
 			CONFIG_OPENTHREAD_ALTERNATE_PHY_AIFS;
+		otEncodingWriteUint16Le(
+			&aCaps[count].mParameters[OT_ALTERNATE_PHY_TL3_GFSK_PARAMETER_MAX_PSDU_LSB],
+			CONFIG_OPENTHREAD_ALTERNATE_PHY_MAX_PSDU);
 		aCaps[count].mFlags =
 			IS_ENABLED(CONFIG_OPENTHREAD_ALTERNATE_PHY_CONCURRENT_LISTENING)
 				? OT_ALTERNATE_PHY_TL3_GFSK_FLAG_CONCURRENT_LISTENING

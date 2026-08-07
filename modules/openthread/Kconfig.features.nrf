@@ -97,6 +97,15 @@ config OPENTHREAD_ALTERNATE_PHY_AIFS
 	  transmitting its acknowledgment on the TL3 GFSK PHY. Advertised as TL3_AIFS in the
 	  PHY ID 0 Alternate PHY Sub-TLV.
 
+config OPENTHREAD_ALTERNATE_PHY_MAX_PSDU
+	int "TL3 maximum PSDU size (octets, including FCS)"
+	default 255
+	depends on OPENTHREAD_ALTERNATE_PHY_GFSK
+	range 127 255
+	help
+	  The largest PSDU this device accepts on TL3, including the 2-octet FCS.
+	  Advertised as TL3_MAX_PSDU in the PHY ID 0 Alternate PHY Sub-TLV.
+
 config OPENTHREAD_ALTERNATE_PHY_CONCURRENT_LISTENING
 	bool "TL3 concurrent listening supported"
 	depends on OPENTHREAD_ALTERNATE_PHY_GFSK
