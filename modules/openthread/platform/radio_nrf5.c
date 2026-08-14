@@ -212,7 +212,7 @@ struct nrf5_rx_frame {
 	bool ack_fpb;	     /* FPB value in ACK sent for the received frame. */
 	bool ack_seb;	     /* SEB value in ACK sent for the received frame. */
 #if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
-	bool is_alternate_phy_payload;
+	nrf_802154_phy_t phy; /* PHY on which this frame was received. */
 #endif
 };
 
@@ -700,6 +700,18 @@ static bool alt_phy_from_id(uint8_t phy_id, nrf_802154_phy_t *phy)
 	}
 }
 
+/** Map a radio driver PHY onto a Thread Alternate PHY identifier. */
+static bool alt_phy_to_id(nrf_802154_phy_t phy, uint8_t *phy_id)
+{
+	switch (phy) {
+	case NRF_802154_PHY_EXP1_GFSK_2MBPS:
+		*phy_id = OT_ALTERNATE_PHY_ID_TL3_GFSK;
+		return true;
+	default:
+		return false;
+	}
+}
+
 /** Retune the radio*/
 static void alt_phy_switch(nrf_802154_phy_t phy, const char *reason)
 {
@@ -886,6 +898,9 @@ static otError alt_phy_transmit_start(void)
 	if (error != OT_ERROR_NONE) {
 		LOG_WRN("HDR: cannot build DAPS for this frame (%u), using the Primary Link",
 			error);
+		memcpy(nrf5_data.tx.psdu, nrf5_data.alt_phy.payload_psdu,
+		       (size_t)(PHR_SIZE + nrf5_data.alt_phy.payload_len));
+		nrf5_data.tx.frame.mPsdu = PSDU_DATA(nrf5_data.tx.psdu);
 		nrf5_data.tx.frame.mLength = nrf5_data.alt_phy.payload_len;
 		return OT_ERROR_NOT_CAPABLE;
 	}
@@ -1098,7 +1113,8 @@ static void openthread_handle_received_frame(otInstance *instance, struct nrf5_r
 	recv_frame.mInfo.mRxInfo.mTimestamp = rx_frame->time;
 	recv_frame.mInfo.mRxInfo.mAckedWithSecEnhAck = rx_frame->ack_seb;
 #if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
-	recv_frame.mInfo.mRxInfo.mIsAlternatePhy = rx_frame->is_alternate_phy_payload;
+	recv_frame.mInfo.mRxInfo.mIsAlternatePhy =
+		alt_phy_to_id(rx_frame->phy, &recv_frame.mInfo.mRxInfo.mAlternatePhyId);
 #endif
 
 	LOG_DBG("RX %p len: %u, ch: %u, rssi: %d", (void *)recv_frame.mPsdu, recv_frame.mLength,
@@ -1273,7 +1289,13 @@ static otError transmit_frame(otInstance *aInstance)
 			return OT_ERROR_NONE;
 		}
 
-		/* The Alternate PHY is unusable for this frame; send it on the Primary Link. */
+		/*
+		 * The frame may exceed the Primary Link MTU. Report an unsent frame so OpenThread
+		 * can rebuild it at the same message offset using the Primary Link and its MTU.
+		 */
+		nrf5_data.tx.result = OT_ERROR_ABORT;
+		set_pending_event(PENDING_EVENT_TX_DONE);
+		return OT_ERROR_NONE;
 	}
 #endif
 
@@ -1373,6 +1395,14 @@ static otError handle_ack(void)
 	nrf5_data.ack.frame.mInfo.mRxInfo.mLqi = nrf5_data.ack.desc.lqi;
 	nrf5_data.ack.frame.mInfo.mRxInfo.mRssi = nrf5_data.ack.desc.rssi;
 	nrf5_data.ack.frame.mInfo.mRxInfo.mTimestamp = nrf5_data.ack.desc.time;
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY)
+	nrf5_data.ack.frame.mInfo.mRxInfo.mIsAlternatePhy =
+		nrf5_data.tx.frame.mInfo.mTxInfo.mIsAlternatePhy;
+	if (nrf5_data.tx.frame.mInfo.mTxInfo.mIsAlternatePhy) {
+		nrf5_data.ack.frame.mInfo.mRxInfo.mAlternatePhyId =
+			nrf5_data.tx.frame.mInfo.mTxInfo.mAlternatePhy.mPhyId;
+	}
+#endif
 
 free_nrf_ack:
 	nrf_802154_buffer_free_raw(nrf5_data.ack.desc.psdu);
@@ -2316,15 +2346,15 @@ static void openthread_nrf_802154_received_timestamp_raw(uint8_t *data, int8_t p
 
 #if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
 		{
+			const nrf_802154_phy_t rx_phy = NRF5_CURRENT_PHY();
 			const bool on_alt_phy = (nrf5_data.alt_phy.state == ALT_PHY_RX_WAIT);
+
+			nrf5_data.rx.frames[i].phy = rx_phy;
+			nrf5_data.rx.frames[i].time = NRF5_TS_END_TO_PHR(time, data[0], rx_phy);
 
 			if (on_alt_phy) {
 				alt_phy_rx_frame_taken(PSDU_LENGTH(data));
 			}
-
-			nrf5_data.rx.frames[i].is_alternate_phy_payload = on_alt_phy;
-			nrf5_data.rx.frames[i].time =
-				NRF5_TS_END_TO_PHR(time, data[0], nrf5_data.alt_phy.phy);
 		}
 #else
 		nrf5_data.rx.frames[i].time = NRF5_TS_END_TO_PHR(time, data[0],

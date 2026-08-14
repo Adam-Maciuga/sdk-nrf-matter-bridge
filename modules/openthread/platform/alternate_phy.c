@@ -47,3 +47,21 @@ uint8_t otPlatAlternatePhyGetCapabilities(otInstance *aInstance, otAlternatePhyC
 
 	return count;
 }
+
+uint8_t otPlatAlternatePhyGetPriority(otInstance *aInstance, uint8_t aPhyId)
+{
+	ARG_UNUSED(aInstance);
+
+	switch (aPhyId) {
+	case OT_ALTERNATE_PHY_ID_PRIMARY_LINK:
+		return CONFIG_OPENTHREAD_PRIMARY_PHY_PRIORITY;
+
+#if defined(CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK)
+	case OT_ALTERNATE_PHY_ID_TL3_GFSK:
+		return CONFIG_OPENTHREAD_ALTERNATE_PHY_GFSK_PRIORITY;
+#endif
+
+	default:
+		return 0;
+	}
+}

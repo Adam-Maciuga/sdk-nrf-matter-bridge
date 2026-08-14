@@ -71,11 +71,30 @@ config OPENTHREAD_ALTERNATE_PHY
 
 if OPENTHREAD_ALTERNATE_PHY
 
+config OPENTHREAD_PRIMARY_PHY_PRIORITY
+	int "Primary IEEE 802.15.4 PHY selection priority"
+	default 0
+	range 0 255
+	help
+	  Local priority of the primary PHY used when selecting a PHY for transmission. The
+	  acceptable PHY with the highest priority is selected, with link quality used to
+	  break a tie.
+
 config OPENTHREAD_ALTERNATE_PHY_GFSK
 	bool "TL3 2 Mbps GFSK radio (PHY ID 0) available"
 	default y
 	help
 	  Advertise support for the TL3 2 Mbps GFSK Alternate PHY (PHY ID 0).
+
+config OPENTHREAD_ALTERNATE_PHY_GFSK_PRIORITY
+	int "TL3 2 Mbps GFSK PHY selection priority"
+	default 1
+	depends on OPENTHREAD_ALTERNATE_PHY_GFSK
+	range 0 255
+	help
+	  Local priority of the TL3 2 Mbps GFSK PHY used when selecting PHY for transmission. The
+	  acceptable PHY with the highest priority is selected, with link quality used to break
+	  a tie.
 
 config OPENTHREAD_ALTERNATE_PHY_SETTLING_DELAY
 	int "TL3 settling delay (microseconds)"
